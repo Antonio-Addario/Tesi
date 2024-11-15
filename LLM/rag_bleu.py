@@ -84,20 +84,25 @@ def generate_body_message(test_pr, retrieved_context):
     issue_comments = " ".join(issue_info.get('comments', []))
 
     prompt = f"""
-    Sei un assistente esperto nello sviluppo software.
-    Devi completare il campo body_message di una pull request dato il suo contesto.
+    As an AI specializing in generating pull request messages for Java-based repositories, provide pull request message predictions in a structured format.
 
-    Ecco la pull request da completare:
+    Your tasks are to:
+    1. Generate predictions exclusively in the form of pull request messages that align with the content and context of the pull request.
+    2. Ensure that predictions are contextually accurate based on provided repository data.
+    3. Focus solely on suggesting meaningful pull request messages that clearly convey the purpose of the changes.
+    4. Avoid generic pull request messages like "minor changes" or "updated code".
+    5. Consider the content of the commit messages, titles, diff, and any associated issue to generate appropriate pull request messages.
+    6. Ignore any code details or syntax; focus solely on the purpose and description of the pull request.
+    7. your response must be in the format "body_message: *predicted response* "
     Title: {test_pr['title']}
     Commit Message: {test_pr['commit_message']}
     Diff: {test_pr['diff']}
     Issue associata: {issue_title}
     Commenti sull'issue: {issue_comments}
-
-    Qui sotto trovi alcune pull request simili per contesto:
+    
+    Below are some pull requests similar in context:
     {retrieved_context}
 
-    Completa il campo body_message per questa pull request.
     """
 
     # Chiamata all'API del modello LLM
