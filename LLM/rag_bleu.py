@@ -37,7 +37,6 @@ def create_faiss_index(train_set):
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
     embeddings = model.encode(pr_texts)
-    print("qui ci sono")
 
     embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
 
@@ -69,7 +68,6 @@ def retrieve_context(query, top_k=3):
         print(f"Errore durante il caricamento del modello: {e}")
 
     query_embedding = model.encode([query])
-    print("non sono qui")
     query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
 
     # Cerca i documenti simili nell'indice FAISS
