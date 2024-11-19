@@ -22,7 +22,6 @@ def load_datasets():
     return train_set, test_set
 
 
-
 def create_faiss_index(train_set):
     pr_texts = [
         f"Title: {pr['title']} "
@@ -32,7 +31,6 @@ def create_faiss_index(train_set):
         for pr in train_set
         if pr.get('title') and pr.get('commit_message')
     ]
-
 
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -53,7 +51,6 @@ def create_faiss_index(train_set):
 
 
 def retrieve_context(query, top_k=3):
-
     # Carica l'indice FAISS e i testi del training set
     index = faiss.read_index('faiss.index')
 
@@ -77,7 +74,6 @@ def retrieve_context(query, top_k=3):
 
 
 def generate_body_message(test_pr, retrieved_context):
-
     # Estrai informazioni dall'issue associata
     issue_info = test_pr.get('issue', {})
     issue_title = issue_info.get('title', 'Nessuna issue associata')
@@ -99,7 +95,7 @@ def generate_body_message(test_pr, retrieved_context):
     Diff: {test_pr['diff']}
     Issue associata: {issue_title}
     Commenti sull'issue: {issue_comments}
-    
+
     Below are some pull requests similar in context:
     {retrieved_context}
 
@@ -164,8 +160,6 @@ def evaluate(test_set):
         print(f"BLEU Score: {score}")
 
     return sum(scores) / len(scores) if scores else 0.0
-
-
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ pull_requests_collection = db['pull_requests_new']
 skipped_collection = db['repository_saltati']  # Collezione per repository saltati
 
 # Connessione a GitHub tramite PyGithub
-token = "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"
+token = "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"
 headers = {
     "Authorization": f"token {token}",
     "Accept": "application/vnd.github.v3+json"
