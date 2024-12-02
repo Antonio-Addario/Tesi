@@ -1,39 +1,51 @@
+import os
+import statistics
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 import pickle
 import requests
 import json
+from pymongo import MongoClient
+from sklearn.model_selection import train_test_split
 from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.meteor_score import single_meteor_score
+import nltk
+from bson import ObjectId
+
+nltk.download('wordnet')
+import re
+
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 
-def load_datasets():
-    with open("train_set.pkl", "rb") as train_file:
-        train_set = pickle.load(train_file)
+def extract_diff_details(diff_text):
+    comments = re.findall(r'//.*|/\*.*?\*/', diff_text, re.DOTALL)
+    class_names = re.findall(r'\bclass\s+(\w+)', diff_text)
+    method_names = re.findall(r'\b(?:public|private|protected)?\s+[\w<>\[\]]+\s+(\w+)\s*\(.*?\)\s*{', diff_text)
+    pom_add_dependencies = re.findall(r'<dependency>.*?<artifactId>(.*?)</artifactId>.*?</dependency>', diff_text,
+                                      re.DOTALL)
+    pom_remove_dependencies = re.findall(r'<!--.*?REMOVE.*?<artifactId>(.*?)</artifactId>.*?-->', diff_text, re.DOTALL)
 
-    with open("test_set.pkl", "rb") as test_file:
-        test_set = pickle.load(test_file)
-
-    # Limita il training set a 20 documenti
-    train_set = train_set[:20]
-
-    print(f"Training set caricato con {len(train_set)} PRs.")
-    print(f"Test set caricato con {len(test_set)} PRs.")
-    return train_set, test_set
+    return {
+        "comments": comments,
+        "class_names": class_names,
+        "method_names": method_names,
+        "added_dependencies": pom_add_dependencies,
+        "removed_dependencies": pom_remove_dependencies
+    }
 
 
 def create_faiss_index(train_set):
     pr_texts = [
-        f"Title: {pr['title']} "
-        f"Commit Message: {pr['commit_message']} "
-        f"Issue: {pr['issue']['title'] if pr.get('issue') else 'Nessuna issue associata'} "
-        f"Comments: {' '.join(pr['issue'].get('comments', [])) if pr.get('issue') and pr['issue'].get('comments') else 'Nessun commento'}"
+        f"title: {pr['title']} "
+        f"body_message: {pr['body_message']} "
+        f"commit_message: {pr['commit_message']} "
+        f"diff: {extract_diff_details(pr['diff'])} "
+        f"issue: {pr['issue']['title'] if pr.get('issue') else None} "
         for pr in train_set
-        if pr.get('title') and pr.get('commit_message')
+        if pr.get('title') and pr.get('commit_message') and len(pr.get("body_message", "")) > 40
     ]
-
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-
     embeddings = model.encode(pr_texts)
 
     embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
@@ -56,14 +68,6 @@ def retrieve_context(query, top_k=3):
 
     with open('train_texts.pkl', 'rb') as f:
         train_texts = pickle.load(f)
-    try:
-        print("Caricamento del modello...")
-        # Crash -> Process finished with exit code 139 (interrupted by signal 11: SIGSEGV)
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        print("Modello caricato con successo!")
-    except Exception as e:
-        print(f"Errore durante il caricamento del modello: {e}")
-
     query_embedding = model.encode([query])
     query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
 
@@ -73,32 +77,42 @@ def retrieve_context(query, top_k=3):
     return [train_texts[idx] for idx in indices[0]]
 
 
-def generate_body_message(test_pr, retrieved_context):
+def generate_body_message(test_pr, retrieved_context, train_set):
     # Estrai informazioni dall'issue associata
     issue_info = test_pr.get('issue', {})
-    issue_title = issue_info.get('title', 'Nessuna issue associata')
-    issue_comments = " ".join(issue_info.get('comments', []))
+    diff = extract_diff_details(test_pr["diff"])
+    body_messages = [pr["body_message"] for pr in train_set if "body_message" in pr and len(pr["body_message"]) > 40]
+    # Lista delle lunghezze di tutti i "body_message"
+    len_body_message = [len(msg) for msg in body_messages]
+    if len(len_body_message) > 0:  # Assicurati che ci siano dati
+        media = statistics.mean(len_body_message)
+        deviazione = statistics.stdev(len_body_message)
+        min_len = min(len_body_message)
+        max_len = max(len_body_message)
+
+        print(f"Media delle lunghezze: {media}")
+        print(f"Deviazione standard: {deviazione}")
+        print(f"Lunghezza minima: {min_len}")
+        print(f"Lunghezza massima: {max_len}")
+    else:
+        print("Nessun dato disponibile per calcolare statistiche.")
 
     prompt = f"""
-    As an AI specializing in generating pull request messages for Java-based repositories, provide pull request message predictions in a structured format.
+    Generate a pull request body message that aligns with the provided context.
+    The length should be similar to previous messages:
+    - Average: {media:.2f} characters, Min: {min_len}, Max: {max_len}, StdDev: {deviazione:.2f}
 
-    Your tasks are to:
-    1. Generate predictions exclusively in the form of pull request messages that align with the content and context of the pull request.
-    2. Ensure that predictions are contextually accurate based on provided repository data.
-    3. Focus solely on suggesting meaningful pull request messages that clearly convey the purpose of the changes.
-    4. Avoid generic pull request messages like "minor changes" or "updated code".
-    5. Consider the content of the commit messages, titles, diff, and any associated issue to generate appropriate pull request messages.
-    6. Ignore any code details or syntax; focus solely on the purpose and description of the pull request.
-    7. your response must be in the format "body_message: *predicted response* "
-    Title: {test_pr['title']}
-    Commit Message: {test_pr['commit_message']}
-    Diff: {test_pr['diff']}
-    Issue associata: {issue_title}
-    Commenti sull'issue: {issue_comments}
+    Information about the current pull request:
+    - title: {test_pr['title']}
+    - commit_message: {test_pr['commit_message']}
+    - diff: {diff}
+    - issue: {issue_info if issue_info else 'None'}
 
-    Below are some pull requests similar in context:
+    Similar pull requests for context:
     {retrieved_context}
 
+    Please generate the body message in the format:
+    body_message: *your response here*
     """
 
     # Chiamata all'API del modello LLM
@@ -122,52 +136,103 @@ def generate_body_message(test_pr, retrieved_context):
     return ''.join(full_response)
 
 
-def evaluate(test_set):
-    scores = []
-    for i, test_pr in enumerate(test_set):
-        if not isinstance(test_pr, dict):
-            print(f"Errore: test_pr non è un dizionario. Indice: {i}, Tipo: {type(test_pr)}, Contenuto: {test_pr}")
-            continue
+def evaluate(test_set, train_set):
+    bleu_scores = []
+    meteor_scores = []
+    pull_requests_test = [
+        {**pr, 'diff': extract_diff_details(pr.get('diff', ""))}
+        for pr in test_set
+        if len(pr.get("body_message", "")) > 40 and pr.get('title') and pr.get('commit_message')
+    ]
 
-        # Verifica che i campi richiesti siano presenti
-        title = test_pr.get('title', 'Titolo non disponibile')
-        commit_message = test_pr.get('commit_message', 'Messaggio non disponibile')
-        body_message = test_pr.get('body_message', '')
-        issue_title = test_pr.get('issue', {}).get('title', 'Nessuna issue associata')
-        if not title or not commit_message:
-            print(f"Errore: PR mancante di dati essenziali. Indice: {i}, Contenuto: {test_pr}")
-            continue
-
+    for test_pr in pull_requests_test:
+        diff = extract_diff_details(test_pr.get("diff"))
         # Prepara la query per il recupero del contesto
-        query = f"Title: {title} Commit Message: {commit_message} Body Message: {body_message} Issue: {issue_title}"
+        query = (f"title: {test_pr.get('title')} "
+                 f"body_message: {test_pr.get('body_message')} "
+                 f"commit_message: {test_pr.get('commit_message')} "
+                 f"diff: {diff} "
+                 f"issue: {test_pr.get('issue')}")
 
         # Recupera il contesto dal training set
         context = retrieve_context(query, top_k=3)
 
         # Rimuovi il body_message dalla PR prima di passarla al modello
         pr_without_body = test_pr.copy()
+        body_message = test_pr.get("body_message")
         pr_without_body.pop('body_message', None)
 
         # Genera il body_message
-        predicted_body = generate_body_message(pr_without_body, context)
+        predicted_body = generate_body_message(pr_without_body, context, train_set)
 
         # Calcola il BLEU score
-        score = sentence_bleu([body_message.split()], predicted_body.split())
-        scores.append(score)
+        bleu_score = sentence_bleu([body_message.split()], predicted_body.split())
+        meteor_score = single_meteor_score(body_message, predicted_body)
+
+        bleu_scores.append(bleu_score)
+        meteor_scores.append(meteor_score)
 
         print(f"Real Body: {body_message}")
         print(f"Predicted Body: {predicted_body}")
-        print(f"BLEU Score: {score}")
+        print(f"BLEU Score: {bleu_score}")
+        print(f"METEOR Score: {meteor_score}")
 
-    return sum(scores) / len(scores) if scores else 0.0
+    # Calcola i punteggi medi
+    average_bleu = sum(bleu_scores) / len(bleu_scores) if bleu_scores else 0.0
+    average_meteor = sum(meteor_scores) / len(meteor_scores) if meteor_scores else 0.0
+
+    return average_bleu, average_meteor
+
+
+def save_to_json(data, filename):
+
+    def convert(obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=4, default=convert)
+
+
+def load_from_json(filename):
+
+    with open(filename, 'r') as f:
+        return json.load(f)
 
 
 if __name__ == "__main__":
-    train_set, test_set = load_datasets()
+    # client = MongoClient("mongodb://localhost:27017/")
+    # db = client['github']
+    # projects = db['projects']
+    # pull_requests = db['pull_requests_new']
+    # repository_name = "DiUS/java-faker"
+    # repository_id = projects.find_one({"repository_name": repository_name})['_id']
+    # pull_requests = list(pull_requests.find({"repository_id": repository_id}))
+    #
+    # if not pull_requests:
+    #     print(f"Nessuna pull request trovata per il repository: {repository_name}")
+    #     exit()
 
+    train_file = 'train_set.json'
+    test_file = 'test_set.json'
+
+    # Carica o crea train/test set
+    if os.path.exists(train_file) and os.path.exists(test_file):
+        print("Caricamento del train e test set dai file...")
+        train_set = load_from_json(train_file)
+        test_set = load_from_json(test_file)
+    # else:
+    #     print("Creazione del train e test set...")
+    #     train_set, test_set = train_test_split(pull_requests, test_size=0.2, random_state=42)
+    #     save_to_json(train_set, train_file)
+    #     save_to_json(test_set, test_file)
+
+    print(f"Training set: {len(train_set)} PRs, Test set: {len(test_set)} PRs")
     # Crea l'indice FAISS con il training set
     create_faiss_index(train_set)
 
     # Valuta le prestazioni sul test set
-    average_bleu = evaluate(test_set)
+    average_bleu, average_meteor = evaluate(test_set, train_set)
     print(f"BLEU Score Medio: {average_bleu}")
+    print(f"METEOR Score Medio: {average_meteor}")

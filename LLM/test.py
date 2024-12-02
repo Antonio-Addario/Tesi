@@ -4,9 +4,13 @@ import random
 import statistics
 import re
 import requests
+import nltk
 from bson import ObjectId
-from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from nltk.translate.meteor_score import single_meteor_score
+
+nltk.download('wordnet')
+
 def extract_diff_details(diff_text):
     comments = re.findall(r'//.*|/\*.*?\*/', diff_text, re.DOTALL)
     class_names = re.findall(r'\bclass\s+(\w+)', diff_text)
@@ -22,16 +26,14 @@ def extract_diff_details(diff_text):
         "removed_dependencies": pom_remove_dependencies
     }
 
-
 # Connessione al database MongoDB
 client = pymongo.MongoClient("mongodb://localhost:27017/")
 db = client["github"]
 pull_requests_collection = db["pull_requests_new"]
 
 # ID del repository da cercare
-repository_id = ObjectId("672a3b7c8eb967273d91a1dd")
-# Ottenere tutte le pull request per il dato repository
-# Ottenere tutte le pull request per il dato repository senza usare $expr
+repository_id = ObjectId("672a3cfd8eb967273d92b957")
+
 pull_requests = list(pull_requests_collection.find({
     "repository_id": repository_id,
     "body_message": {
@@ -39,9 +41,11 @@ pull_requests = list(pull_requests_collection.find({
         "$ne": None
     }
 }))
-
-# Filtrare le pull request con body_message più lungo di 40 caratteri
-pull_requests = [pr for pr in pull_requests if len(pr["body_message"]) > 40]
+pull_requests = [
+    {**pr, 'diff': extract_diff_details(pr.get('diff', ""))}
+    for pr in pull_requests
+    if len(pr.get("body_message", "")) > 40
+]
 
 # Selezionare una pull request a caso da prevedere
 if pull_requests:
@@ -49,7 +53,7 @@ if pull_requests:
     pull_requests.remove(actual_pr)
     actual_body_message = actual_pr.pop("body_message", None)
     print("Body_message da prevedere: ", actual_body_message)
-    diff_details = extract_diff_details(actual_pr.get('diff', ""))
+    diff_details = actual_pr.get('diff', "")
     formatted_diff_details = (
         f"Comments: {diff_details['comments']}\n"
         f"Class Names: {diff_details['class_names']}\n"
@@ -75,45 +79,38 @@ if pull_requests:
         print(f"Lunghezza massima: {max_len}")
     else:
         print("Nessun dato disponibile per calcolare statistiche.")
-else:
-    print("Nessuna pull request trovata per il repository specificato.")
 
-
+    # Limita il contesto a 3 pull request simili
+    similar_pull_requests = pull_requests[:3]
+    context_pull_requests = [{
+        'title': pr.get('title'),
+        'body_message': pr.get('body_message'),
+        'commit_message': pr.get('commit_message')
+    } for pr in similar_pull_requests]
 
 # Definisci l'URL del server Ollama
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
 # Testo di input da fornire al modello
 prompt = f"""
-    As an AI specializing in generating pull request messages for Java-based repositories, provide pull request message predictions in a structured format.
-
-    Your tasks are to:
-    1. Generate predictions exclusively in the form of pull request messages that align with the content and context of the pull request.
-    2. Ensure that predictions are contextually accurate based on provided repository data.
-    3. Focus solely on suggesting meaningful pull request messages that clearly convey the purpose of the changes.
-    4. Avoid generic pull request messages like "minor changes" or "updated code".
-    5. Consider the content of the commit messages, titles, diff, and any associated issue to generate appropriate pull request messages.
-    6. Your response must be in the format "body_message: *predicted response*"
-    7. Ensure that the length of the predicted pull request message is approximately similar to the average length of previous messages.
+    Based on the provided information, generate a pull request body message that:
+    - Avoids unnecessary descriptions and focuses only on the body message.
+    - The length of the message should be approximately similar to the average length of previous messages.
     Length Statistics for Reference:
     - Average Length: {media:.2f} characters
     - Minimum Length: {min_len} characters
     - Maximum Length: {max_len} characters
     - Standard Deviation: {deviazione:.2f} characters
 
-    Data for predicted pull request message:
+    Data for the pull request:
     Commit Messages: {actual_pr.get('commit_message')}
     Title: {actual_pr.get('title')}
-    Diff: {formatted_diff_details}
     Issue: {actual_pr.get('issue')}
-    <Context>
-    Below are some pull requests similar in context:
-    {pull_requests}
     """
 
 # Payload per la richiesta
 payload = {
-    "model": "llama3.2:latest",  # Usa il nome del modello che hai installato
+    "model": "llama3.2:latest",
     "prompt": prompt
 }
 
@@ -133,9 +130,10 @@ if response.status_code == 200:
         # Stampa l'output completo
         print("Predicted BODY MESSAGE:", output)
         print("Actual BODY MESSAGE:", actual_body_message)
-        bleu_score = sentence_bleu(actual_body_message, output)
+        bleu_smoothing = SmoothingFunction().method1
+        bleu_score = sentence_bleu([actual_body_message.split()], output.split(), smoothing_function=bleu_smoothing)
         print("BLEU SCORE:", bleu_score)
-        meteor_score = single_meteor_score(actual_body_message, output)
+        meteor_score = single_meteor_score(actual_body_message.split(), output.split())
         print("METEOR SCORE:", meteor_score)
 
     except json.JSONDecodeError as e:
@@ -145,4 +143,3 @@ if response.status_code == 200:
         print(response.text)
 else:
     print(f"Errore: {response.status_code}, {response.text}")
-

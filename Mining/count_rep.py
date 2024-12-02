@@ -1,18 +1,36 @@
-from pymongo import MongoClient
+from pymongo.mongo_client import MongoClient
 
 # Connessione a MongoDB
 client = MongoClient("mongodb://localhost:27017/")
 db = client['github']
-pull_requests_collection = db['pull_requests']
+projects = db['projects']
+pull_requests_collection = db['pull_requests_new']
 
-# Nome del repository da filtrare
-repository_name = "bitcoinj/bitcoinj"
+# Trova tutti i repository nella collezione 'projects'
+repositories = projects.find()
 
-# Recupera il documento del repository specifico
-repository_document = pull_requests_collection.find_one({"repository_name": repository_name})
+# Dati da salvare
+repo_pr_counts = []
 
-if repository_document:
-    total_pr_count = len(repository_document.get("pull_requests", []))
-    print(f"Il numero totale di pull request salvate per il repository '{repository_name}' è: {total_pr_count}")
-else:
-    print(f"Nessun documento trovato per il repository '{repository_name}'")
+print("Conteggio delle pull request per ogni repository:")
+for repo in repositories:
+    repository_id = repo["_id"]
+    repository_name = repo["repository_name"]
+
+    # Conta il numero di pull request associate al repository
+    pr_count = pull_requests_collection.count_documents({"repository_id": repository_id})
+
+    # Stampa il risultato
+    print(f"Repository: {repository_name}, Pull Requests: {pr_count}")
+
+    # Aggiungi ai dati da salvare
+    repo_pr_counts.append({
+        "repository_name": repository_name,
+        "pull_request_count": pr_count
+    })
+
+# Salva i risultati in una collezione separata (opzionale)
+repo_counts_collection = db['repo_pr_counts']
+repo_counts_collection.delete_many({})  # Pulisce i dati esistenti
+repo_counts_collection.insert_many(repo_pr_counts)
+print("I conteggi delle pull request sono stati salvati nella collezione 'repo_pr_counts'.")
